@@ -1,0 +1,9 @@
+{
+  "id": "gdrive-sync",
+  "name": "GDrive Meeting Sync",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.11",
+  "description": "Sync Google Drive meeting docs to your vault as markdown",
+  "author": "Chris Bigler",
+  "isDesktopOnly": true
+}

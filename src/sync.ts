@@ -1,0 +1,169 @@
+import { App, Notice, requestUrl } from "obsidian";
+import * as fs from "fs";
+import * as path from "path";
+import { getAccessToken } from "./auth";
+import type { GDriveSyncSettings, DriveFile, Manifest, SyncResult } from "./types";
+
+function sanitizeName(name: string): string {
+  name = name.replace(/\//g, "-").replace(/:/g, " -");
+  for (const ch of ["\\", "?", "*", '"', "<", ">", "|"]) {
+    name = name.split(ch).join("");
+  }
+  return name.trim();
+}
+
+function findUniqueFilename(baseName: string, driveId: string, manifest: Manifest): string {
+  const claimed: Record<string, string> = {};
+  for (const [mid, entry] of Object.entries(manifest)) {
+    if (entry.localFile) {
+      claimed[entry.localFile] = mid;
+    }
+  }
+
+  let candidate = `${baseName}.md`;
+  const owner = claimed[candidate];
+  if (owner === undefined || owner === driveId) {
+    return candidate;
+  }
+
+  let counter = 2;
+  while (true) {
+    candidate = `${baseName}_${counter}.md`;
+    const o = claimed[candidate];
+    if (o === undefined || o === driveId) {
+      return candidate;
+    }
+    counter++;
+  }
+}
+
+async function listDriveFiles(token: string, folderId: string): Promise<DriveFile[]> {
+  const files: DriveFile[] = [];
+  let pageToken: string | undefined;
+
+  while (true) {
+    const params = new URLSearchParams({
+      q: `'${folderId}' in parents and mimeType='application/vnd.google-apps.document'`,
+      fields: "files(id,name,modifiedTime),nextPageToken",
+      pageSize: "100",
+    });
+    if (pageToken) {
+      params.set("pageToken", pageToken);
+    }
+
+    let resp;
+    try {
+      resp = await requestUrl({
+        url: `https://www.googleapis.com/drive/v3/files?${params.toString()}`,
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (e: any) {
+      const status = e?.status || "unknown";
+      const body = e?.response?.text || e?.message || String(e);
+      console.error(`[gdrive-sync] Drive API error (${status}):`, body);
+      throw new Error(`Drive API error (${status}): ${body}`);
+    }
+
+    const data = resp.json;
+    files.push(...(data.files || []));
+    pageToken = data.nextPageToken;
+    if (!pageToken) break;
+  }
+
+  return files;
+}
+
+async function exportFile(token: string, fileId: string): Promise<ArrayBuffer | null> {
+  try {
+    const resp = await requestUrl({
+      url: `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=text/markdown`,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (resp.status !== 200 || !resp.arrayBuffer.byteLength) {
+      return null;
+    }
+
+    return resp.arrayBuffer;
+  } catch {
+    return null;
+  }
+}
+
+function loadManifest(manifestPath: string): Manifest {
+  try {
+    const raw = fs.readFileSync(manifestPath, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function saveManifest(manifestPath: string, manifest: Manifest): void {
+  const tmp = manifestPath + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2));
+  fs.renameSync(tmp, manifestPath);
+}
+
+export async function sync(app: App, settings: GDriveSyncSettings): Promise<SyncResult> {
+  const token = await getAccessToken(settings);
+
+  const manifest = loadManifest(settings.manifestPath);
+
+  const driveFiles = await listDriveFiles(token, settings.folderId);
+  console.log(`[gdrive-sync] Found ${driveFiles.length} docs in Drive folder`);
+
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const destFolder = settings.destFolder;
+
+  // Ensure destination folder exists in the vault
+  if (!await app.vault.adapter.exists(destFolder)) {
+    await app.vault.adapter.mkdir(destFolder);
+  }
+
+  let newCount = 0;
+  let adoptedCount = 0;
+  let skippedCount = 0;
+  let errorCount = 0;
+
+  for (const df of driveFiles) {
+    const { id: fileId, name, modifiedTime } = df;
+    const sanitized = sanitizeName(name);
+
+    if (manifest[fileId]) {
+      skippedCount++;
+      continue;
+    }
+
+    const localFile = findUniqueFilename(sanitized, fileId, manifest);
+    const vaultPath = `${destFolder}/${localFile}`;
+
+    // Adopt if file already exists on disk
+    if (await app.vault.adapter.exists(vaultPath)) {
+      manifest[fileId] = { name, localFile, modifiedTime, syncedAt: now };
+      adoptedCount++;
+      console.log(`[gdrive-sync] ADOPTED: ${localFile}`);
+      continue;
+    }
+
+    // Download new file
+    const content = await exportFile(token, fileId);
+    if (content) {
+      // Write binary content via adapter
+      await app.vault.adapter.writeBinary(vaultPath, content);
+      manifest[fileId] = { name, localFile, modifiedTime, syncedAt: now };
+      newCount++;
+      console.log(`[gdrive-sync] NEW: ${localFile}`);
+    } else {
+      errorCount++;
+      console.log(`[gdrive-sync] ERROR downloading: ${name}`);
+    }
+  }
+
+  saveManifest(settings.manifestPath, manifest);
+
+  const summary = `${newCount} new, ${adoptedCount} adopted, ${skippedCount} skipped, ${errorCount} errors`;
+  console.log(`[gdrive-sync] Summary: ${summary}`);
+
+  return { newCount, adoptedCount, skippedCount, errorCount };
+}
