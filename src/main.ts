@@ -1,6 +1,6 @@
 import { Notice, Plugin } from "obsidian";
 import { GDriveSyncSettingTab } from "./settings";
-import { sync } from "./sync";
+import { sync, backfillFrontmatter } from "./sync";
 import { DEFAULT_SETTINGS, type GDriveSyncSettings } from "./types";
 
 const ENCRYPTED_FIELDS: (keyof GDriveSyncSettings)[] = ["clientSecret", "refreshToken"];
@@ -31,7 +31,10 @@ function decrypt(value: string): string {
 
 export default class GDriveSyncPlugin extends Plugin {
   settings: GDriveSyncSettings = DEFAULT_SETTINGS;
+  nextSyncTime: number | null = null;
   private syncIntervalId: number | null = null;
+  private statusBarEl: HTMLElement | null = null;
+  private isSyncing = false;
 
   async onload() {
     await this.loadSettings();
@@ -44,13 +47,38 @@ export default class GDriveSyncPlugin extends Plugin {
       callback: () => this.runSync(),
     });
 
+    this.addCommand({
+      id: "backfill-frontmatter",
+      name: "Backfill frontmatter to synced notes",
+      callback: async () => {
+        try {
+          const { updatedCount, skippedCount } = await backfillFrontmatter(this.app, this.settings);
+          new Notice(`GDrive frontmatter backfill: ${updatedCount} updated, ${skippedCount} skipped`);
+        } catch (e) {
+          console.error("[gdrive-sync] Backfill failed:", e);
+          new Notice(`GDrive frontmatter backfill failed: ${String(e)}`);
+        }
+      },
+    });
+
     this.addRibbonIcon("refresh-cw", "Sync GDrive meetings", () => this.runSync());
 
+    this.statusBarEl = this.addStatusBarItem();
+    this.updateStatusBar();
+    this.registerInterval(
+      window.setInterval(() => this.updateStatusBar(), 30_000)
+    );
+
     this.startSyncInterval();
+
+    if (this.settings.syncOnStartup) {
+      this.app.workspace.onLayoutReady(() => this.runSync());
+    }
   }
 
   onunload() {
     this.syncIntervalId = null;
+    this.nextSyncTime = null;
   }
 
   async loadSettings() {
@@ -85,6 +113,8 @@ export default class GDriveSyncPlugin extends Plugin {
   }
 
   async runSync() {
+    if (this.isSyncing) return;
+
     if (!this.settings.refreshToken) {
       new Notice("GDrive Sync: Not authorized. Open settings to connect Google.");
       return;
@@ -94,6 +124,8 @@ export default class GDriveSyncPlugin extends Plugin {
       return;
     }
 
+    this.isSyncing = true;
+    this.updateStatusBar();
     new Notice("GDrive sync starting...");
     try {
       const result = await sync(this.app, this.settings);
@@ -106,6 +138,30 @@ export default class GDriveSyncPlugin extends Plugin {
     } catch (e) {
       console.error("[gdrive-sync] Sync failed:", e);
       new Notice(`GDrive sync failed: ${String(e)}`);
+    } finally {
+      this.isSyncing = false;
+      this.updateStatusBar();
+    }
+  }
+
+  updateStatusBar() {
+    if (!this.statusBarEl) return;
+    if (this.isSyncing) {
+      this.statusBarEl.setText("GDrive: Syncing...");
+      return;
+    }
+    const t = this.nextSyncTime;
+    if (t === null) {
+      this.statusBarEl.setText("GDrive: Auto-sync disabled");
+      return;
+    }
+    const diff = Math.max(0, Math.round((t - Date.now()) / 60_000));
+    if (diff <= 0) {
+      this.statusBarEl.setText("GDrive: Syncing momentarily...");
+    } else if (diff === 1) {
+      this.statusBarEl.setText("GDrive: Next sync in 1 min");
+    } else {
+      this.statusBarEl.setText(`GDrive: Next sync in ${diff} min`);
     }
   }
 
@@ -115,7 +171,9 @@ export default class GDriveSyncPlugin extends Plugin {
       window.clearInterval(this.syncIntervalId);
       this.syncIntervalId = null;
     }
+    this.nextSyncTime = null;
     this.startSyncInterval();
+    this.updateStatusBar();
   }
 
   private startSyncInterval() {
@@ -123,8 +181,12 @@ export default class GDriveSyncPlugin extends Plugin {
     if (minutes <= 0) return;
 
     const ms = minutes * 60 * 1000;
+    this.nextSyncTime = Date.now() + ms;
     this.syncIntervalId = this.registerInterval(
-      window.setInterval(() => this.runSync(), ms)
+      window.setInterval(() => {
+        this.nextSyncTime = Date.now() + ms;
+        this.runSync();
+      }, ms)
     );
   }
 }

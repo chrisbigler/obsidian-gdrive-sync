@@ -5,6 +5,8 @@ export interface GDriveSyncSettings {
   folderId: string;
   destFolder: string;
   syncIntervalMinutes: number;
+  enableFrontmatter: boolean;
+  syncOnStartup: boolean;
   manifestPath: string;
 }
 
@@ -15,6 +17,8 @@ export const DEFAULT_SETTINGS: GDriveSyncSettings = {
   folderId: "",
   destFolder: "Meetings",
   syncIntervalMinutes: 30,
+  enableFrontmatter: false,
+  syncOnStartup: true,
   manifestPath: `${process.env.HOME}/.gdrive-sync/manifest.json`,
 };
 
