@@ -62,7 +62,7 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    // -- Google OAuth credentials --
+    new Setting(containerEl).setName("Google Account").setHeading();
 
     new Setting(containerEl)
       .setName("Client ID")
@@ -90,8 +90,6 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
           });
         text.inputEl.type = "password";
       });
-
-    // -- Auth status + button --
 
     const isConnected = !!this.plugin.settings.refreshToken;
 
@@ -140,7 +138,7 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
       );
     }
 
-    // -- Sync settings --
+    new Setting(containerEl).setName("Sync").setHeading();
 
     new Setting(containerEl)
       .setName("Drive folder")
@@ -198,9 +196,23 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
       );
     }
 
+    new Setting(containerEl).setName("Notes").setHeading();
+
+    new Setting(containerEl)
+      .setName("Sync on startup")
+      .setDesc("Run a sync immediately when Obsidian starts")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.syncOnStartup)
+          .onChange(async (value) => {
+            this.plugin.settings.syncOnStartup = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
     new Setting(containerEl)
       .setName("Sync interval (minutes)")
-      .setDesc("How often to auto-sync. Set to 0 to disable auto-sync.")
+      .setDesc("How often to auto-sync. Set to 0 to disable.")
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.syncIntervalMinutes))
@@ -213,6 +225,20 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
             }
           })
       );
+
+    new Setting(containerEl)
+      .setName("Add Google Doc link to new notes")
+      .setDesc("Prepend YAML frontmatter with a link back to the Google Doc")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.enableFrontmatter)
+          .onChange(async (value) => {
+            this.plugin.settings.enableFrontmatter = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl).setName("Advanced").setHeading();
 
     new Setting(containerEl)
       .setName("Manifest path")
